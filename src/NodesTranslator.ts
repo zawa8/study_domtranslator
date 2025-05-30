@@ -1,56 +1,14 @@
 import { XMutationObserver } from './lib/XMutationObserver';
 import { configureTranslatableNodePredicate } from './utils/nodes';
-
-interface NodeData {
-	/**
-	 * Unique node identifier
-	 */
-	id: number;
-
-	/**
-	 * Each node update should increase the value
-	 */
-	updateId: number;
-
-	/**
-	 * Contains `updateId` value at time when start node translation
-	 */
-	translateContext: number;
-
-	/**
-	 * Original node text, before start translation
-	 * Contains `null` for node that not been translated yet
-	 */
-	originalText: null | string;
-
-	/**
-	 * Priority to translate node. The bigger the faster will translate
-	 */
-	priority: number;
-}
-
-/**
- * @param handler if return `false`, loop will stop
- */
-const nodeExplore = (
-	inputNode: Node,
-	nodeFilter: number,
-	includeSelf: boolean,
-	handler: (value: Node) => void | boolean,
-) => {
+interface NodeData { id: number; updateId: number; translateContext: number; originalText: null | string; priority: number; }
+const nodeExplore = (inputNode: Node, nodeFilter: number, includeSelf: boolean,	handler: (value: Node) => void | boolean,) => {
 	const walk = document.createTreeWalker(inputNode, nodeFilter, null);
 	let node = includeSelf ? walk.currentNode : walk.nextNode();
 	while (node) {
-		if (handler(node) === false) {
-			return;
-		}
+		if (handler(node) === false) { return; }
 		node = walk.nextNode();
 	}
 };
-
-/**
- * Check visibility of element in viewport
- */
 export function isInViewport(element: Element, threshold = 0) {
 	const { top, left, bottom, right, height, width } = element.getBoundingClientRect();
 	const overflows = {
@@ -91,78 +49,53 @@ export interface Config {
 export class NodesTranslator {
 	private readonly translateCallback: TranslatorInterface;
 	private readonly config: InnerConfig;
-
 	constructor(translateCallback: TranslatorInterface, config?: Config) {
 		this.translateCallback = translateCallback;
 		this.config = {
 			...config,
-			isTranslatableNode:
-				config?.isTranslatableNode ?? configureTranslatableNodePredicate(),
-			lazyTranslate:
-				config?.lazyTranslate !== undefined ? config?.lazyTranslate : true,
+			isTranslatableNode: config?.isTranslatableNode ?? configureTranslatableNodePredicate(),
+			lazyTranslate: config?.lazyTranslate !== undefined ? config?.lazyTranslate : true,
 		};
 	}
-
 	private readonly observedNodesStorage = new Map<Element, XMutationObserver>();
 	public observe(node: Element) {
-		if (this.observedNodesStorage.has(node)) {
-			throw new Error('Node already under observe');
-		}
-
+		if (this.observedNodesStorage.has(node)) { throw new Error('Node already under observe'); }
 		// Observe node and childs changes
 		const observer = new XMutationObserver();
 		this.observedNodesStorage.set(node, observer);
-
 		observer.addHandler('elementAdded', ({ target }) => this.addNode(target));
 		observer.addHandler('elementRemoved', ({ target }) => this.deleteNode(target));
-		observer.addHandler('characterData', ({ target }) => {
-			this.updateNode(target);
-		});
+		observer.addHandler('characterData', ({ target }) => { this.updateNode(target); });
 		observer.addHandler('changeAttribute', ({ target, attributeName }) => {
 			if (attributeName === undefined || attributeName === null) return;
 			if (!(target instanceof Element)) return;
-
 			const attribute = target.attributes.getNamedItem(attributeName);
-
 			if (attribute === null) return;
-
 			// NOTE: If need delete untracked nodes, we should keep relates like Element -> attributes
-			if (!this.nodeStorage.has(attribute)) {
-				this.addNode(attribute);
-			} else {
-				this.updateNode(attribute);
-			}
+			if (!this.nodeStorage.has(attribute)) { this.addNode(attribute); } else { this.updateNode(attribute); }
 		});
-
 		observer.observe(node);
 		this.addNode(node);
 	}
 
 	public unobserve(node: Element) {
-		if (!this.observedNodesStorage.has(node)) {
-			throw new Error('Node is not under observe');
-		}
-
+		if (!this.observedNodesStorage.has(node)) { throw new Error('Node is not under observe'); }
 		this.deleteNode(node);
 		this.observedNodesStorage.get(node)?.disconnect();
 		this.observedNodesStorage.delete(node);
 	}
-
 	public getNodeData(node: Node) {
 		const nodeData = this.nodeStorage.get(node);
 		if (nodeData === undefined) return null;
-
 		const { originalText } = nodeData;
 		return { originalText };
 	}
-
 	private readonly itersectStorage = new WeakSet<Node>();
 	private readonly itersectObserver = new IntersectionObserver(
 		(entries, observer) => {
 			entries.forEach((entry) => {
 				const node = entry.target;
 				if (!this.itersectStorage.has(node) || !entry.isIntersecting) return;
-
 				this.itersectStorage.delete(node);
 				observer.unobserve(node);
 				this.intersectNode(node);
@@ -190,60 +123,35 @@ export class NodesTranslator {
 	private nodeStorage = new WeakMap<Node, NodeData>();
 	private handleNode = (node: Node) => {
 		if (this.nodeStorage.has(node)) return;
-
 		// Skip empthy text
 		if (node.nodeValue === null || node.nodeValue.trim().length == 0) return;
-
 		// Skip not translatable nodes
 		if (!this.isTranslatableNode(node)) return;
-
 		const priority = this.getNodeScore(node);
-
-		this.nodeStorage.set(node, {
-			id: this.idCounter++,
-			updateId: 1,
-			translateContext: 0,
-			originalText: null,
-			priority,
-		});
-
+		this.nodeStorage.set(node, { id: this.idCounter++, updateId: 1, translateContext: 0, originalText: null, priority, });
 		this.translateNode(node);
 	};
-
 	private addNode(node: Node) {
 		// Add all nodes which element contains (text nodes and attributes of current and inner elements)
 		if (node instanceof Element) {
 			this.handleTree(node, (node) => {
 				if (node instanceof Element) return;
-
-				if (this.isTranslatableNode(node)) {
-					this.addNode(node);
-				}
+				if (this.isTranslatableNode(node)) { this.addNode(node); }
 			});
-
 			return;
 		}
-
 		// Handle text nodes and attributes
-
 		// Lazy translate when own element intersect viewport
 		// But translate at once if node have not parent (virtual node) or parent node is outside of body (utility tags like meta or title)
 		if (this.config.lazyTranslate) {
 			const isAttachedToDOM = node.getRootNode() !== node;
-			const observableNode =
-				node instanceof Attr ? node.ownerElement : node.parentElement;
-
+			const observableNode = node instanceof Attr ? node.ownerElement : node.parentElement;
 			// Ignore lazy translation for not intersectable nodes and translate it immediately
-			if (
-				isAttachedToDOM &&
-				observableNode !== null &&
-				this.isIntersectableNode(observableNode)
-			) {
+			if ( isAttachedToDOM && observableNode !== null && this.isIntersectableNode(observableNode) ) {
 				this.handleElementByIntersectViewport(observableNode);
 				return;
 			}
 		}
-
 		// Add to storage
 		this.handleNode(node);
 	}
@@ -286,28 +194,16 @@ export class NodesTranslator {
 	 */
 	private translateNode(node: Node) {
 		const nodeData = this.nodeStorage.get(node);
-		if (nodeData === undefined) {
-			throw new Error('Node is not register');
-		}
-
+		if (nodeData === undefined) { throw new Error('Node is not register'); }
 		if (node.nodeValue === null) return;
-
 		// Recursion prevention
-		if (nodeData.updateId <= nodeData.translateContext) {
-			return;
-		}
-
+		if (nodeData.updateId <= nodeData.translateContext) { return; }
 		const nodeId = nodeData.id;
 		const nodeContext = nodeData.updateId;
 		return this.translateCallback(node.nodeValue, nodeData.priority).then((text) => {
 			const actualNodeData = this.nodeStorage.get(node);
-			if (actualNodeData === undefined || nodeId !== actualNodeData.id) {
-				return;
-			}
-			if (nodeContext !== actualNodeData.updateId) {
-				return;
-			}
-
+			if (actualNodeData === undefined || nodeId !== actualNodeData.id) { return; }
+			if (nodeContext !== actualNodeData.updateId) { return; }
 			// actualNodeData.translateData = text;
 			actualNodeData.originalText = node.nodeValue !== null ? node.nodeValue : '';
 			actualNodeData.translateContext = actualNodeData.updateId + 1;
@@ -316,13 +212,9 @@ export class NodesTranslator {
 		});
 	}
 
-	private isTranslatableNode(targetNode: Node) {
-		return this.config.isTranslatableNode(targetNode);
-	}
-
+	private isTranslatableNode(targetNode: Node) { return this.config.isTranslatableNode(targetNode); }
 	private isIntersectableNode = (node: Element) => {
 		if (node.nodeName === 'OPTION') return false;
-
 		return document.body.contains(node);
 	};
 
@@ -331,7 +223,6 @@ export class NodesTranslator {
 	 */
 	private getNodeScore = (node: Node) => {
 		let score = 0;
-
 		if (node instanceof Attr) {
 			score += 1;
 			const parent = node.ownerElement;
@@ -358,19 +249,13 @@ export class NodesTranslator {
 	private handleTree(node: Element, callback: (node: Node) => void) {
 		nodeExplore(node, NodeFilter.SHOW_ALL, true, (node) => {
 			callback(node);
-
 			if (node instanceof Element) {
 				// Handle nodes from opened shadow DOM
 				if (node.shadowRoot !== null) {
-					for (const child of Array.from(node.shadowRoot.children)) {
-						this.handleTree(child, callback);
-					}
+					for (const child of Array.from(node.shadowRoot.children)) { this.handleTree(child, callback); }
 				}
-
 				// Handle attributes of element
-				for (const attribute of Object.values(node.attributes)) {
-					callback(attribute);
-				}
+				for (const attribute of Object.values(node.attributes)) { callback(attribute); }
 			}
 		});
 	}
